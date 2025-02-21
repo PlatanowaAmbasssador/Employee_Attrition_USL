@@ -1,0 +1,874 @@
+---
+title: "Employee Attrition Analysis Using Clustering and Dimensionality Reduction"
+author: "Kamil Kashif (428629)"
+output: 
+  html_document:
+    # theme: null
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    css: style.css
+    code_folding: show
+geometry: "left = 2.5cm, right = 2.5cm, top = 2.5cm, bottom = 2.5cm"
+header-includes:
+  - \usepackage{floatrow}
+  - \usepackage{amsmath}
+  - \floatsetup[figure]{capposition=top}
+---
+
+```{r setup, include=FALSE, echo=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(123)  # For reproducibility
+
+library(tidyverse)
+library(lubridate) 
+library(cluster)
+library(clustertend)
+library(factoextra)
+library(dbscan)
+library(ggpubr)
+library(ggplot2)
+library(seriation)
+library(fpc)
+library(reshape2)
+library(emmeans)
+library(clusterSim)
+library(FactoMineR)
+library(factoextra)
+library(kableExtra)
+library(dplyr)
+library(png)
+library(grid)
+library(gridExtra)
+library(knitr)
+```
+
+# Introduction
+
+Employee attrition is a critical challenge for organizations, as high turnover can lead to increased costs and decreased productivity. This project explores clustering techniques to analyze employee attrition patterns using the IBM HR Analytics Attrition dataset from [Kaggle](https://www.kaggle.com/datasets/pavansubhasht/ibm-hr-analytics-attrition-dataset). The dataset contains various employee attributes, including demographic, job-related, and performance-related factors. 
+
+In this study, three clustering methods—K-Means, Partitioning Around Medoids (PAM), and Hierarchical Clustering—are applied to identify meaningful groups within the dataset. Initially, clustering is performed without dimensionality reduction. Then, dimensionality reduction techniques, namely Principal Component Analysis (PCA) and Multi-Dimensional Scaling (MDS), are employed to reduce the dataset's complexity before applying the clustering algorithms. Hierarchical Clustering is also performed on the reduced datasets to assess its effectiveness in identifying employee groups.  
+
+To determine the optimal number of clusters, the Elbow Method based on Within-Cluster Sum of Squares (WCSS) and Silhouette Analysis are utilized. The results from different clustering approaches are compared to evaluate the impact of dimensionality reduction on clustering performance.  
+
+In the beginning, the Hopkins Statistic is calculated to check the **clustering tendency** of the dataset. This metric helps determine whether the data is clusterable or if it follows a random distribution. A **Hopkins value close to 1** indicates that the data has a strong clustering tendency, whereas a value near **0** suggests that the data is randomly distributed and clustering may not be meaningful. The formula for the **Hopkins Statistic (HS)** is:  
+
+$$
+HS = \frac{\sum_{i=1}^{m} w_i}{\sum_{i=1}^{m} w_i + \sum_{i=1}^{m} u_i}
+$$  
+
+where:
+
+- $m$ is the number of randomly selected data points from the dataset.  
+
+- $w_i$ is the distance from a randomly selected point to its **nearest neighbor** in the original dataset.  
+
+- $u_i$ is the distance from a randomly generated synthetic point to its **nearest neighbor** in the original dataset.
+
+The best clustering algorithm is chosen based on **Calinski-Harabasz (CH) Index**, a common metric to evaluate the cluster quality. A higher CH index indicates that clusters are well-designed. The formula is:
+
+$$CH = \frac{\frac{B_{k}}{k-1}}{\frac{W_{k}}{n-k}}$$
+where:
+
+- $B_{k}$ - Between-Cluster Variance
+
+- $W_{k}$ - Within-Cluster Variance
+
+- $k$ - Number of Clusters
+
+- $n$ - Total number of data points
+
+# Data
+
+```{r chunk_1, eval = FALSE}
+df <- read.csv("./data/WA_Fn-UseC_-HR-Employee-Attrition.csv")
+```
+
+This Kaggle dataset is a fictional dataset created by IBM Data Scientist and shows the factors relevant for employee attrition. The dataset contains 35 variables and 1470 observations. As the dataset is high dimensional, both the pre and post dimnesinality reduction results are shown. The following variables are in the dataset:
+
+```{r chunk_2, echo=TRUE}
+col_1 <- c("Age", "DistanceFromHome", "EnvironmentSatisfaction", "JobeRole", "NumCompaniesWorked", "RelationshipSatisfaction", "WorkLifeBalance")
+col_2 <- c("Attrition", "Education", "Gender", "JobSatisfaction", "Over18", "StandardHours", "YearsAtCompany")
+col_3 <- c("BusinessTravel", "EducationField", "HourlyRate", "MaritalStatus", "OverTime", "StockOptionLevel", "YearsInCurrentRole")
+col_4 <- c("DailyRate", "EmployeeCount", "JobInvolvement", "MonthlyIncome", "PercentSalaryHike", "TotalWorkingYears", "YearsSinceLastPromotion")
+col_5 <- c("Department", "EmployeeNumber", "JobLevel", "MonthlyRate", "PerformanceRating", "TrainingTimesLastYear", "YearsWithCurrManager")
+
+df_col <- data.frame(
+  "col1_" = col_1,
+  "col2_" = col_2,
+  "col3_" = col_3,
+  "col4_" = col_4,
+  "col5_" = col_5
+)
+
+df_col %>%
+  kable(align = "c", 
+        col.names = c("", "", "", "", ""), 
+        caption = "Dataset Features", escape = FALSE) %>%
+  kable_styling("basic", full_width = F, position = "center")
+```
+
+In order to do the analysis, two variables were excluded - **Attrition** as it is kind of a target variable in the analysis and **Over18** as all the values were **YES**, this would cause problems for the analysis and all the missing values were excluded - no complex data imputation was performed. Furthermore, for the categorical variables, one-hot encoding was performed which in turn increased the dimensinality of the data from **1470x35** to **1470x46**.
+
+```{r chunk_3, eval = FALSE, echo=TRUE}
+# Remove Missing Values
+df <- na.omit(df)
+
+# Remove "Attrition" column - it is our target variable
+df_featured <- df %>%
+  dplyr::select(-Attrition, -Over18)
+
+# One-hot-encoding categorical features
+df_featured <- df_featured %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  model.matrix(~ . - 1, data = .) %>%
+  as.data.frame()
+df_featured <- df_featured[, sapply(df_featured, function(x) sd(x) != 0)]
+
+# Scale numeric feature
+df_scaled <- scale(df_featured)
+```
+
+```{r chunk_4, eval = FALSE, echo=TRUE}
+hopkins_stat <- get_clust_tendency(df_scaled, n = nrow(df_scaled) - 1)$hopkins_stat
+hopkins_stat
+```
+
+Next, the *Hopkins Statistic* was calculated. For the pre-dimensionality-reduction, the value is **0.6489177**. It is not close to 1 but it closer to 1 than 0, therefore, we conclude the dataset has a tendency to cluster. In further analysis, cluster tendency will also be calculated for the post-dimensionality-reduction analysis.
+
+# Methodology
+
+In this analysis, cluster methods such as KMeans and PAM are used and dimension reduction methods such as PCA and MDS are used. This section gives a short review about these methods. As we have discussed them in our classes and I have also written absence papers about them, this part is thus written by **AI**. I hope this is not an issue.
+
+## K-Means  
+K-Means is a partition-based clustering algorithm that aims to divide a dataset into \( k \) clusters by minimizing the variance within each cluster. The algorithm follows an iterative process:  
+1. Initialize \( k \) cluster centroids randomly.  
+2. Assign each data point to the nearest centroid.  
+3. Update centroids based on the mean of assigned points.  
+4. Repeat steps 2 and 3 until convergence.  
+
+## PAM (Partitioning Around Medoids)  
+PAM is a robust alternative to K-Means that uses medoids instead of centroids. Unlike K-Means, PAM selects actual data points as cluster centers, making it less sensitive to outliers. The algorithm follows these steps:  
+1. Select \( k \) medoids (representative points) randomly.  
+2. Assign each data point to the nearest medoid.  
+3. Swap medoids with non-medoids to minimize clustering cost.  
+4. Repeat until no further improvement is possible.  
+
+## PCA (Principal Component Analysis)  
+PCA is a dimensionality reduction technique that transforms high-dimensional data into a lower-dimensional space while preserving as much variance as possible. The key steps are:  
+1. Standardize the dataset.  
+2. Compute the covariance matrix.  
+3. Obtain eigenvalues and eigenvectors.  
+4. Project data onto the top principal components.  
+
+## MDS (Multidimensional Scaling)  
+MDS is a technique used to visualize high-dimensional data by projecting it into a lower-dimensional space while preserving pairwise distances. The steps include:  
+1. Compute a distance matrix between all data points.  
+2. Find a lower-dimensional representation that best maintains these distances.  
+3. Optimize the placement of points to minimize stress (discrepancy between original and transformed distances).  
+
+These methods (PCA & MDS) collectively help in clustering and visualizing the structure of the dataset.
+
+# Empirical Analysis - pre-dimensionality-reduction {.tabset}
+
+This sections will perform the empirical analysis for the pre-dimensionality-reduction dataset. Two algorithm are considered KMeans and PAM. Silhoutte and Elbow analysis are considered for each and the best algorithm is based on the **Calinski-Harabasz (CH) Index**. It is worth mentioning that KMeans clustering is done using the **Euclidean distance metric** and the PAM clustering is done using the **Gowers distance metric** as with categorical variables this is a preffered measure.
+
+```{r chunk_5, eval = FALSE, echo=TRUE}
+# Silhouette analysis for KMeans
+silhouette_plot_KMeans <- fviz_nbclust(df_scaled, FUNcluster = kmeans, method = "silhouette", k.max = 20, nboot = 100) +
+  labs(subtitle = "Silhouette method - KMeans") +
+  geom_vline(xintercept = 3, linetype = 2) +
+  geom_vline(xintercept = 6, linetype = 2) +
+  geom_vline(xintercept = 10, linetype = 2)
+
+# Save Silhouette plot
+ggsave(filename = "images/silhouette_plot_KMeans.png", plot = silhouette_plot_KMeans, width = 8, height = 6)
+
+# Elbow method for KMeans
+elbow_plot_KMeans <- fviz_nbclust(df_scaled, FUNcluster = kmeans, method = "wss", k.max = 20, nboot = 100) +
+  geom_vline(xintercept = 10, linetype = 2) + 
+  labs(subtitle = "Elbow method - KMeans")
+
+# Save Elbow plot
+ggsave(filename = "images/elbow_plot_KMeans.png", plot = elbow_plot_KMeans, width = 8, height = 6)
+```
+
+## KMeans
+```{r chunk_6, echo=TRUE, fig.width = 10, fig.height = 4, fig.align='center'}
+# Read and display Silhouette plot
+img_silhouette <- rasterGrob(readPNG("images/silhouette_plot_KMeans.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+# Read and display Elbow plot
+img_elbow <- rasterGrob(readPNG("images/elbow_plot_KMeans.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+# Arrange images side by side using grid.arrange
+grid.arrange(img_silhouette, img_elbow, ncol = 2)
+```
+
+```{r chunk_7, eval = FALSE, echo=TRUE}
+# PAM - finding optimal cluster
+pam_clustering <- function(data, k) {
+  gower_dist <- daisy(data, metric = "gower")
+  pam_fit <- pam(gower_dist, diss = TRUE, k = k)
+  return(pam_fit)
+}
+
+# Silhouette analysis for PAM
+silhouette_plot_PAM <- fviz_nbclust(df_scaled, FUNcluster = pam_clustering, method = "silhouette", k.max = 20, nboot = 100) +
+  labs(subtitle = "Silhouette method - PAM")
+
+# Save Silhouette plot
+ggsave(filename = "images/silhouette_plot_PAM.png", plot = silhouette_plot_PAM, width = 8, height = 6)
+
+# Elbowmethod for PAM
+elbow_plot_KMeans <- fviz_nbclust(df_scaled, FUNcluster = pam_clustering, method = "wss", k.max = 20, nboot = 100) +
+  geom_vline(xintercept = 10, linetype = 2) + 
+  labs(subtitle = "Elbow method - PAM")
+
+# Save Elbow plot
+ggsave(filename = "images/elbow_plot_PAM.png", plot = elbow_plot_KMeans, width = 8, height = 6)
+```
+
+## PAM
+
+```{r chunk_8, echo=TRUE, fig.width = 10, fig.height = 4, fig.align='center'}
+# Read and display Silhouette plot
+img_silhouette <- rasterGrob(readPNG("images/silhouette_plot_PAM.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+# Read and display Elbow plot
+img_elbow <- rasterGrob(readPNG("images/elbow_plot_PAM.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+# Arrange images side by side using grid.arrange
+grid.arrange(img_silhouette, img_elbow, ncol = 2)
+```
+
+# {.tabset}
+As you see from the figure above, I have decided to check $K = \{3, 6, 7, 10\}$ for KMeans and  $K = \{2, 10\}$ for PAM. The results are presented below:
+
+```{r chunk_9, eval = FALSE, echo=TRUE}
+# KMeans
+
+# KMeans = 3
+KMeans_3 <- kmeans(df_scaled, centers = 3, nstart = 25)
+
+# KMeans = 6
+KMeans_6 <- kmeans(df_scaled, centers = 6, nstart = 25)
+
+# KMeans = 7
+KMeans_7 <- kmeans(df_scaled, centers = 7, nstart = 25)
+
+# KMeans = 10
+KMeans_10 <- kmeans(df_scaled, centers = 10, nstart = 25)
+
+# PAM
+gower_dist <- daisy(df_scaled, metric = "gower")
+
+# PAM = 2
+PAM_2 <- pam(gower_dist, diss = TRUE, k = 2, nstart = 25)
+
+# PAM = 10
+PAM_10 <- pam(gower_dist, k = 10, nstart = 25)
+```
+
+```{r chunk_10, eval = FALSE, echo=TRUE}
+# Save KMeans plots as PNG
+png("images/KMeans_3_cluster.png")
+fviz_cluster(KMeans_3, data = df_scaled)
+dev.off()
+
+png("images/KMeans_3_silhouette.png")
+fviz_silhouette(silhouette(KMeans_3$cluster, dist(df_scaled)))
+dev.off()
+
+png("images/KMeans_6_cluster.png")
+fviz_cluster(KMeans_6, data = df_scaled)
+dev.off()
+
+png("images/KMeans_6_silhouette.png")
+fviz_silhouette(silhouette(KMeans_6$cluster, dist(df_scaled)))
+dev.off()
+
+png("images/KMeans_7_cluster.png")
+fviz_cluster(KMeans_7, data = df_scaled)
+dev.off()
+
+png("images/KMeans_7_silhouette.png")
+fviz_silhouette(silhouette(KMeans_7$cluster, dist(df_scaled)))
+dev.off()
+
+png("images/KMeans_10_cluster.png")
+fviz_cluster(KMeans_10, data = df_scaled)
+dev.off()
+
+png("images/KMeans_10_silhouette.png")
+fviz_silhouette(silhouette(KMeans_10$cluster, dist(df_scaled)))
+dev.off()
+
+# Save PAM plots as PNG
+png("images/PAM_2_cluster.png")
+fviz_cluster(list(data = df_scaled, cluster = PAM_2$clustering))
+dev.off()
+
+png("images/PAM_2_silhouette.png")
+fviz_silhouette(PAM_2)
+dev.off()
+
+png("images/PAM_10_cluster.png")
+fviz_cluster(list(data = df_scaled, cluster = PAM_10$clustering))
+dev.off()
+
+png("images/PAM_10_silhouette.png")
+fviz_silhouette(PAM_10)
+dev.off()
+```
+
+## KMeans=3
+```{r echunk_11, echo=TRUE, fig.width=10, fig.height=4, fig.align='center',}
+# Read images
+img_kmeans_3_cluster <- rasterGrob(readPNG("images/KMeans_3_cluster.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+img_kmeans_3_silhouette <- rasterGrob(readPNG("images/KMeans_3_silhouette.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+grid.arrange(img_kmeans_3_cluster, img_kmeans_3_silhouette, ncol = 2)
+```
+
+## KMeans=6
+```{r chunk_12, echo=TRUE, fig.width=10, fig.height=4, fig.align='center',}
+# Read images
+img_kmeans_6_cluster <- rasterGrob(readPNG("images/KMeans_6_cluster.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+img_kmeans_6_silhouette <- rasterGrob(readPNG("images/KMeans_6_silhouette.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+grid.arrange(img_kmeans_6_cluster, img_kmeans_6_silhouette, ncol = 2)
+```
+
+## KMeans=7
+```{r chunk_13, echo=TRUE, fig.width=10, fig.height=4, fig.align='center',}
+# Read images
+img_kmeans_7_cluster <- rasterGrob(readPNG("images/KMeans_7_cluster.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+img_kmeans_7_silhouette <- rasterGrob(readPNG("images/KMeans_7_silhouette.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+grid.arrange(img_kmeans_7_cluster, img_kmeans_7_silhouette, ncol = 2)
+```
+
+## KMeans=10
+```{r chunk_14, echo=TRUE, fig.width=10, fig.height=4, fig.align='center',}
+# Read images
+img_kmeans_10_cluster <- rasterGrob(readPNG("images/KMeans_10_cluster.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+img_kmeans_10_silhouette <- rasterGrob(readPNG("images/KMeans_10_silhouette.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+grid.arrange(img_kmeans_10_cluster, img_kmeans_10_silhouette, ncol = 2)
+```
+
+## PAM=2
+```{r chunk_16, echo=TRUE, fig.width=10, fig.height=4, fig.align='center'}
+# Read PAM images
+img_pam_2_cluster <- rasterGrob(readPNG("images/PAM_2_cluster.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+img_pam_2_silhouette <- rasterGrob(readPNG("images/PAM_2_silhouette.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+grid.arrange(img_pam_2_cluster, img_pam_2_silhouette, ncol = 2)
+```
+
+## PAM=10
+```{r chunk_17, echo=TRUE, fig.width=10, fig.height=4, fig.align='center'}
+# Read PAM images
+img_pam_2_cluster <- rasterGrob(readPNG("images/PAM_2_cluster.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+img_pam_2_silhouette <- rasterGrob(readPNG("images/PAM_2_silhouette.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+img_pam_10_cluster <- rasterGrob(readPNG("images/PAM_10_cluster.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+img_pam_10_silhouette <- rasterGrob(readPNG("images/PAM_10_silhouette.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+
+grid.arrange(img_pam_10_cluster, img_pam_10_silhouette, ncol = 2)
+```
+
+Below are the calculations for the **Calinski-Harabasz (CH) Index**:
+
+```{r chunk_18, echo=TRUE, eval = FALSE}
+# Create a combined dataframe for KMeans and PAM cluster statistics
+combined_stats <- data.frame(
+  Model = c("KMeans", "", "", "", "", "PAM", "", ""),
+  Cluster = c("", "KMeans = 3", "KMeans = 6", "KMeans = 7", "KMeans = 10", "", "PAM = 2", "PAM = 10"),
+  ClusterStat = c( "",
+    cluster.stats(dist(df_scaled), KMeans_3$cluster)$ch,
+    cluster.stats(dist(df_scaled), KMeans_6$cluster)$ch,
+    cluster.stats(dist(df_scaled), KMeans_7$cluster)$ch,
+    cluster.stats(dist(df_scaled), KMeans_10$cluster)$ch,
+    "",
+    cluster.stats(gower_dist, PAM_2$clustering)$ch,
+    cluster.stats(gower_dist, PAM_10$clustering)$ch
+  )
+)
+
+write.csv(combined_stats, './data/combined_stats.csv')
+```
+
+# {.tabset}
+## Calinski-Harabasz (CH) Index Results
+
+```{r chunk_19, echo=TRUE, warning=FALSE}
+combined_stats <- read.csv('./data/combined_stats.csv')
+
+combined_stats[c(1,2,3,4,5,6,7,8,9), 4] <- round(combined_stats[c(1,2,3,4,5,6,7,8,9), 4], 2)
+
+max_ch_index <- max(combined_stats$ClusterStat)
+row_to_bold <- which(combined_stats$ClusterStat == max_ch_index)
+
+combined_stats <- combined_stats %>% mutate_all(~ ifelse(is.na(.), "", .)) 
+
+combined_stats %>%
+  kable(align = "c", 
+        col.names = c("", "Algorithm", "Number of Clusters", "CH Index"),
+        caption = "Table presenting the results of the clustering", escape = FALSE) %>%
+  kable_styling("basic", full_width = F, position = "center") %>%
+  row_spec(length(row_to_bold)+2, bold = TRUE)
+```
+
+As you see, the best cluster method based on the **Calinski-Harabasz (CH) Index** is - **KMeans with 3 clusters**. Therefore, below is a summary of mean and standard deviation for each cluster:
+
+```{r chunk_20, echo=TRUE, eval = FALSE, warnings=FALSE}
+df$Cluster <- KMeans_3$cluster
+
+summary_by_cluster_mean <- df %>%
+  group_by(Cluster) %>%
+  summarise(across(c(Age, DailyRate, DistanceFromHome, Education, EmployeeNumber, 
+                     EnvironmentSatisfaction, HourlyRate, JobInvolvement, JobLevel, 
+                     JobSatisfaction, MonthlyIncome, MonthlyRate, NumCompaniesWorked, 
+                     PercentSalaryHike, PerformanceRating, RelationshipSatisfaction, 
+                     StockOptionLevel, TotalWorkingYears, TrainingTimesLastYear, 
+                     WorkLifeBalance, YearsAtCompany, YearsInCurrentRole, 
+                     YearsSinceLastPromotion, YearsWithCurrManager), 
+                   list(mean = mean), na.rm = TRUE))
+
+summary_by_cluster_sd <- df %>%
+  group_by(Cluster) %>%
+  summarise(across(c(Age, DailyRate, DistanceFromHome, Education, EmployeeNumber, 
+                     EnvironmentSatisfaction, HourlyRate, JobInvolvement, JobLevel, 
+                     JobSatisfaction, MonthlyIncome, MonthlyRate, NumCompaniesWorked, 
+                     PercentSalaryHike, PerformanceRating, RelationshipSatisfaction, 
+                     StockOptionLevel, TotalWorkingYears, TrainingTimesLastYear, 
+                     WorkLifeBalance, YearsAtCompany, YearsInCurrentRole, 
+                     YearsSinceLastPromotion, YearsWithCurrManager), 
+                   list(sd = sd), na.rm = TRUE))
+
+colnames(summary_by_cluster_mean) <- gsub("_mean", "", colnames(summary_by_cluster_mean))
+colnames(summary_by_cluster_sd) <- gsub("_sd", "", colnames(summary_by_cluster_sd))
+
+summary_by_cluster <- cbind(t(summary_by_cluster_mean), "", t(summary_by_cluster_sd))
+
+write.csv(summary_by_cluster, "./data/summary_by_cluster.csv")
+```
+
+```{r chunk_21, echo=TRUE}
+summary_by_cluster <- read.csv("./data/summary_by_cluster.csv")
+summary_by_cluster <- data.frame(summary_by_cluster)
+
+summary_by_cluster[ , 2:8] <- round(summary_by_cluster[ , 2:8], 2) 
+summary_by_cluster <- summary_by_cluster %>% mutate_all(~ ifelse(is.na(.), "-", .)) 
+summary_by_cluster[2, 2:8] <- as.character(summary_by_cluster[2, 2:8])
+
+summary_by_cluster %>%
+  kable(align = "c", 
+        col.names = c("", "", "MEAN", "", "", "", "STANDARD DEVIATION", ""),
+        caption = "Table presenting the results of the clustering", escape = FALSE) %>%
+  kable_styling("basic", full_width = F, position = "center") 
+```
+
+# Empirical Analysis - post-dimensionality-reduction
+
+In this section, we will reduce the dimensions of the dimensions of the dataset using the PCA and the MDS algorithms and then perform KMeans and PAM algorithms for clustering. The idea is to compare the clustering using both reduction methods. At the end, a table of results will be presented.
+
+## {.tabset}
+
+PCA is the most common dimension reduction technique used. It transforms variables into a smaller set of uncorrelated deatures that are basically the principal components. These principal components capture the highest variance in the data such that the user can reduce the dimension and perform visualizations and train complex models for high dimension dataset. 
+
+Based on the results below, if we choose the approach of keeping dimensions where eigenvalues value is above 1 then we need 20 dimensions. From the table and plot this explains around *71.94%* of variance. However, 20 dimensions this is still a lot. Most probably, for this case, the ideal would be to explain *60.61%* of variance with 15 Dimensions. This way we have reduced **from 46 dimensions to 15**, which is more than half. The contributions can be seen in PCA_15.
+
+Another dimensionality reduction technique used is MDS, which preserves pairwise distances while reducing dimensions. Unlike PCA, which uses covariance decomposition, MDS is useful for non-linear structures and visualization. However, it takes more time to compute than PCA, making PCA a more efficient choice..
+
+```{r chunk_22, echo=TRUE, eval = FALSE}
+# PCA
+pca_result <- PCA(df_scaled, ncp=20, scale.unit = TRUE, graph=FALSE) 
+write.csv(data.frame(get_eigenvalue(pca_result)), "./data/eigenvalues.csv")
+
+png("images/pca_res.png")
+plot(pca_result, choix = "ind", habillage = 1)
+dev.off()
+
+png("images/eig_pca.png")
+fviz_eig(pca_result, addlabels=TRUE, ncp = 20)
+dev.off()
+
+png("images/pca_var.png")
+fviz_pca_var(pca_result, col.var="cos2", alpha.var="contrib", gradient.cols = c("blue", "green", "red"), repel = TRUE)
+dev.off()
+
+png("images/pca_15.png")
+fviz_contrib(pca_result, choice = "var", axes = 15, top = 10)
+dev.off()
+```
+
+### PCA Variance
+
+```{r chunk_22A, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+df_variance <- read.csv("./data/eigenvalues.csv")
+
+df_variance[ , 2:4] <- round(df_variance[, 2:4], 2) 
+
+df_variance <- head(df_variance, 20)
+
+df_variance %>%
+  kable(align = "c", 
+        col.names = c("", "Eigenvalue", "Variance %", "Cumulative Variance %"),
+        caption = "Table presenting the results of the PCA", escape = FALSE) %>%
+  kable_styling("basic", full_width = F, position = "center") 
+```
+
+### PCA Results 
+```{r chunk_23, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+pca_res <- rasterGrob(readPNG("images/pca_res.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(pca_res, ncol = 1)
+```
+
+### PCA Eig
+```{r chunk_24, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+eig_pca <- rasterGrob(readPNG("images/eig_pca.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(eig_pca, ncol = 1)
+```
+
+### PCA Var
+```{r chunk_25, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+pca_var <- rasterGrob(readPNG("images/pca_var.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(pca_var, ncol = 1)
+```
+
+### PCA 15
+```{r chunk_25A, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+pca_var <- rasterGrob(readPNG("images/pca_15.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(pca_var, ncol = 1)
+```
+
+### MDS
+
+```{r chunk_26, echo=TRUE, eval = FALSE}
+# MDS
+mds_result <- cmdscale(gower_dist, k = 2, eig = TRUE)
+
+mds_coords <- as.data.frame(mds_result$points)
+colnames(mds_coords) <- c("Dim1", "Dim2")
+
+png("images/mds_plot.png")
+plot(mds_coords, col = "blue", pch = 16, cex = 0.5)
+dev.off()
+```
+
+```{r chunk_27AE, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# MDS
+img_mds <- rasterGrob(readPNG("images/mds_plot.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_mds, ncol = 1)
+```
+
+## Clustering - KMeans and PAM {.tabset}
+
+Based on the Sillhoutte Analysis below, the following cluster numbers are into consideration:
+
+$$
+\Phi_t = 
+\begin{cases} 
+PCA  & \begin{cases} Kmeans  = \{3, 6\} \\ PAM = \{2, 4\} \end{cases} \\
+MDS  & \begin{cases} Kmeans = \{11, 13\} \\ PAM = \{2, 4\} \end{cases}
+\end{cases}
+$$
+
+```{r chunk_30, echo=TRUE, eval = FALSE, fig.width=6, fig.height=6, fig.align='center', warnings=FALSE}
+# KMeans
+
+# PCA
+pca_coords <- pca_result$ind$coord
+pca_nbclust <- fviz_nbclust(pca_coords, FUNcluster = kmeans, method = c("silhouette"), k.max = 20, nboot = 100) +
+  labs(subtitle = "Silhouette method (PCA) - KMeans") +
+  geom_vline(xintercept = 3, linetype = 2)
+
+ggsave(filename = "images/pca_KMeans.png", plot = pca_nbclust, width = 6, height = 6)
+
+# MDS
+png("/images/mds_KMeans.png")
+mds_nbclust <- fviz_nbclust(mds_coords, FUNcluster = kmeans, method = c("silhouette"), k.max = 20, nboot = 100) +
+  labs(subtitle = "Silhouette method (MDS) - KMeans") +
+  geom_vline(xintercept = 2, linetype = 2)
+ggsave(filename = "images/mds_KMeans.png", plot = mds_nbclust, width = 6, height = 6)
+
+# PAM
+pam_clustering <- function(data, k) {
+  gower_dist <- daisy(data, metric = "gower")
+  pam_fit <- pam(gower_dist, diss = TRUE, k = k)
+  return(pam_fit)
+}
+
+# PCA
+pca_PAM <- fviz_nbclust(pca_coords, FUNcluster = pam_clustering, method = "silhouette", k.max = 20, nboot = 100) +
+  labs(subtitle = "Silhouette method (PCA) - PAM") + 
+  geom_vline(xintercept = 11, linetype = 2)
+ggsave(filename = "images/pca_PAM.png", plot = pca_PAM, width = 6, height = 6)
+
+# MDS
+mds_PAM <- fviz_nbclust(mds_coords, FUNcluster = pam_clustering, method = "silhouette", k.max = 20, nboot = 100) +
+  labs(subtitle = "Silhouette method (MDS) - PAM") + 
+  geom_vline(xintercept = 2, linetype = 2)
+ggsave(filename = "images/mds_PAM.png", plot = mds_PAM, width = 6, height = 6)
+```
+
+### KMeans PCA
+```{r chunk_27A, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# PCA
+img_pca <- rasterGrob(readPNG("images/pca_KMeans.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### KMeans MDS
+```{r chunk_27AD, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# MDS
+img_pca <- rasterGrob(readPNG("images/mds_KMeans.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### PAM PCA
+```{r chunk_27AC, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# PCA
+img_pca <- rasterGrob(readPNG("images/pca_PAM.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### PAM MDS
+```{r chunk_27AB, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# MDS
+img_pca <- rasterGrob(readPNG("images/mds_PAM.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+```{r chunk_27AAZ, echo=TRUE, eval = FALSE}
+# KMeans
+
+# PCA
+KMeans_3_PCA <- kmeans(pca_coords, centers = 3, nstart = 25)
+KM_3_PCA <- fviz_cluster(KMeans_3_PCA, data = df_scaled)
+ggsave(filename = "images/KM_3_PCA.png", plot = KM_3_PCA, width = 6, height = 6)
+
+KMeans_6_PCA <- kmeans(pca_coords, centers = 6, nstart = 25)
+KM_6_PCA <- fviz_cluster(KMeans_6_PCA, data = df_scaled)
+ggsave(filename = "images/KM_6_PCA.png", plot = KM_6_PCA, width = 6, height = 6)
+
+# MDS
+gower_dist <- daisy(mds_coords, metric = "gower")
+KMeans_11_MDS <- kmeans(gower_dist, centers = 11, nstart = 25)
+KM_11_MDS <- fviz_cluster(KMeans_11_MDS, data = df_scaled)
+ggsave(filename = "images/KM_11_MDS.png", plot = KM_11_MDS, width = 6, height = 6)
+
+KMeans_13_MDS <- kmeans(gower_dist, centers = 13, nstart = 25)
+KM_13_MDS <- fviz_cluster(KMeans_13_MDS, data = df_scaled)
+ggsave(filename = "images/KM_13_MDS.png", plot = KM_13_MDS, width = 6, height = 6)
+
+# PAM
+
+# PCA
+PAM_2_PCA <- pam(pca_coords, diss = TRUE, k = 2, nstart = 25)
+PM_2_PCA <- fviz_cluster(list(data = df_scaled, cluster = PAM_2_PCA$clustering))
+ggsave(filename = "images/PAM_2_PCA.png", plot = PM_2_PCA, width = 6, height = 6)
+
+PAM_4_PCA <- pam(pca_coords, diss = TRUE, k = 4, nstart = 25)
+PM_4_PCA <- fviz_cluster(list(data = df_scaled, cluster = PAM_4_PCA$clustering))
+ggsave(filename = "images/PAM_4_PCA.png", plot = PM_4_PCA, width = 6, height = 6)
+
+# MDS
+PAM_2_MDS <- pam(gower_dist, diss = TRUE, k = 2, nstart = 25)
+PM_2_MDS <- fviz_cluster(list(data = df_scaled, cluster = PAM_2_MDS$clustering))
+ggsave(filename = "images/PAM_2_MDS.png", plot = PM_2_MDS, width = 6, height = 6)
+
+PAM_4_MDS <- PAM_4_MDS <- pam(gower_dist, diss = TRUE, k = 4, nstart = 25)
+PM_4_MDS <- fviz_cluster(list(data = df_scaled, cluster = PAM_4_MDS$clustering))
+ggsave(filename = "images/PAM_4_MDS.png", plot = PM_4_MDS, width = 6, height = 6)
+```
+
+## {.tabset}
+
+### PCA KMeans = 3
+```{r chunk_27ABC, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/KM_3_PCA.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### PCA KMeans = 6
+```{r chunk_27ABCC, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/KM_6_PCA.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### MDS KMeans = 11
+```{r chunk_27ABD, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/KM_11_MDS.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### MDS KMeans = 13
+```{r chunk_27ABEE, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/KM_13_MDS.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### PCA PAM = 2
+```{r chunk_27ABF, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/PAM_2_PCA.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### PCA PAM = 4
+```{r chunk_27ABG, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/PAM_4_PCA.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### PCA MDS = 2
+```{r chunk_27ABE, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/PAM_2_MDS.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+### PCA MDS = 4
+```{r chunk_27ABH, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+img_pca <- rasterGrob(readPNG("images/PAM_4_MDS.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_pca, ncol = 1)
+```
+
+# {.tabset}
+## Calinski-Harabasz (CH) Index Results
+
+```{r chunk_40, eval = FALSE, echo=TRUE}
+# Create a combined dataframe for KMeans and PAM cluster statistics
+combined_stats <- data.frame(
+  Model = c("KMeans", "", "", "", "", "PAM", "", "", "", ""),
+  Cluster = c("", "KMeans (PCA) = 3", "KMeans (PCA) = 6", "KMeans (MDS) = 11", "KMeans (MDS) = 13", "", "PAM (PCA) = 2", "PAM (PCA) = 4", "PAM (MDS) = 2", "PAM (MDS) = 4"),
+  ClusterStat = c( "",
+    cluster.stats(dist(pca_coords), KMeans_3_PCA$cluster)$ch,
+    cluster.stats(dist(pca_coords), KMeans_6_PCA$cluster)$ch,
+    cluster.stats(gower_dist, KMeans_11_MDS$cluster)$ch,
+    cluster.stats(gower_dist, KMeans_13_MDS$cluster)$ch,
+    "",
+    cluster.stats(dist(pca_coords), PAM_2_PCA$cluster)$ch,
+    cluster.stats(dist(pca_coords), PAM_4_PCA$cluster)$ch,
+    cluster.stats(gower_dist, PAM_2_MDS$cluster)$ch,
+    cluster.stats(gower_dist, PAM_4_MDS$cluster)$ch
+  )
+)
+
+write.csv(combined_stats, "./data/CH_DS.csv")
+```
+
+```{r chunk_40A, echo=TRUE, warning=FALSE}
+combined_stats <- read.csv('./data/CH_DS.csv')
+
+combined_stats[c(1,2,3,4,5,6,7,8,9,10), 4] <- round(combined_stats[c(1,2,3,4,5,6,7,8,9,10), 4], 2)
+
+max_ch_index <- max(combined_stats$ClusterStat)
+row_to_bold <- which(combined_stats$ClusterStat == max_ch_index)
+
+combined_stats <- combined_stats %>% mutate_all(~ ifelse(is.na(.), "", .)) 
+
+combined_stats %>%
+  kable(align = "c", 
+        col.names = c("", "Algorithm", "Number of Clusters", "CH Index"),
+        caption = "Table presenting the results of the clustering", escape = FALSE) %>%
+  kable_styling("basic", full_width = F, position = "center") %>%
+  row_spec(10, bold = TRUE)
+```
+
+The **Calinski-Harabasz (CH) Index** indicates the best performing algorithm is PAM with 4 clusters and dimensions reduced using MDS. However, the values of CH Index looks suspicious as they are very high. From the visualisations, the KMeans algorithm with 3 clusters and dimensions reduced using PCA looks sufficient enough.
+
+# Hierarchial Clustering 
+
+In this section, we applied Hierarchical Clustering to both datasets with dimensions reduced using PCA and MDS. Hierarchical clustering is a method that builds a hierarchy of clusters by iteratively merging or splitting them based on similarity measures. The optimal number of clusters is automatically determined by the function, with partitions suggested based on the highest loss of inertia. The plot represents a dendrogram, which visualizes the clustering structure by showing how observations in the first two dimensions are grouped at different levels of hierarchy.
+
+## {.tabset}
+
+```{r chunk_28A, echo=TRUE, eval = FALSE}
+# Hierarchical Clustering - PCA
+hc_pca <- HCPC(pca_result, -1, graph = F)
+
+hc_PCA_dend <- fviz_dend(hc_pca, 
+          palette = "jco", 
+          rect = TRUE, rect_fill = TRUE, 
+          rect_border = "jco",          
+)
+ggsave(filename = "images/hc_PCA_dend.png", plot = hc_PCA_dend, width = 6, height = 6)
+
+png(filename = "images/hc_PCA_plot.png", width = 6, height = 6, units = "in", res = 300)
+plot(hc_pca, choice = "3D.map")
+dev.off()
+```
+
+```{r chunk_29, echo=TRUE, eval = FALSE}
+# Hierarchical Clustering - MDS
+hc_mds <- HCPC(mds_coords, -1, graph = F)
+
+hc_MDS_dend <- fviz_dend(hc_mds, 
+          palette = "jco", 
+          rect = TRUE, rect_fill = TRUE, 
+          rect_border = "jco",          
+)
+ggsave(filename = "images/hc_MDS_dend.png", plot = hc_MDS_dend, width = 6, height = 6)
+
+png(filename = "images/hc_MDS_plot.png", width = 6, height = 6, units = "in", res = 300)
+plot(hc_mds, choice = "3D.map")
+dev.off()
+```
+
+### PCA Dendogram
+```{r chunk_28AAA, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# PCA
+img_mds <- rasterGrob(readPNG("images/hc_PCA_dend.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_mds, ncol = 1)
+```
+
+### MDS Dendogram
+```{r chunk_29A, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# MDS
+img_mds <- rasterGrob(readPNG("images/hc_MDS_dend.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_mds, ncol = 1)
+```
+
+### PCA Plot
+```{r chunk_28AP, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# PCA
+img_mds <- rasterGrob(readPNG("images/hc_PCA_plot.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_mds, ncol = 1)
+```
+
+### MDS Plot
+```{r chunk_29AX, echo=TRUE, fig.width=6, fig.height=6, fig.align='center'}
+# MDS
+img_mds <- rasterGrob(readPNG("images/hc_MDS_plot.png"), width = unit(1, "npc"), height = unit(1, "npc"))
+grid.arrange(img_mds, ncol = 1)
+```
+
+
+# Summary
+
+Clustering methods are typically applied to continuous data, especially for beginners, but I chose a dataset that includes categorical variables as well. The analysis compared clustering with and without dimensionality reduction, using PCA, MDS, K-Means, PAM, and Hierarchical Clustering. Different distance metrics were tested for PAM before and after dimension reduction. The results showed that without dimensionality reduction, K-Means performed best with 3 clusters, while after reduction, PAM with MDS (4 clusters) performed best based on the Calinski-Harabasz (CH) Index—the chosen evaluation metric. However, the clustering result for PAM with MDS appears somewhat suspicious in this case.
+
+As mentioned earlier, the results without dimensionality reduction showed that the K-Means algorithm with 3 clusters performed the best. Some descriptive statistics are shown in the "Table presenting the results of the clustering". We can define the three clusters as follows:
+
+- Cluster 1 - Early-Career Employees
+
+- Cluster 2 - Mid-Career Employees
+
+- Cluster 3 - Senior-Career Employees
+
+The reason I see it that way is because all the averages for other features are similar, however the main difference lies in the feature "JobLevel", "YearsACompany", "YearsInCurrentRole", and "YearsSinceLastPromotion".. The Early-Career employees are the ones who are still building their careers. They are more likely to leave the company for better opportunities if they are not satisfied with their current job. The **risk of attrition is high**. The recommendation is to the focus on this groups career development programs and present them a transparent of promotion to retain them.
+
+The Mid-Career employees are the ones who have stayed in the company beyond Early-Career roles but are not Senior yet. They have a higher Monthly Income, and spent more years in the company. The **risk of attrition is moderate**. The recommendation is to focus on their job satisfaction, skill development and work-life balance to retain them.
+
+The Senior-Career employees are the ones who stayed in the company for the longest time, they have high salaries and stable career levels. Although, **the risk of attrition is lower** than the other groups, they are also the ones that will leave due to reasons such as retirement. The recommendation to retain them is to provide them a goof retirement package, leadership opportunities due to their age, and other incentives based on their experience that no other company can offer.
+
+The recommendations provided are based on how I see the data and the clusters. However, the company can additionally conduct a survey to understand the reasons behind the attrition and then take actions based on the both results.
+
+# References:
+
+https://rpkgs.datanovia.com/factoextra/reference/get_clust_tendency.html
